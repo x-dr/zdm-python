@@ -1,0 +1,99 @@
+name: zdm_crawler_python
+
+on:
+  # 需要定时运行时取消下面两行注释
+  # schedule:
+  #   - cron: "0/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      should_commit:
+        description: '立即生成提交记录'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: 145
+          chromedriver-version: 145
+          install-chromedriver: true
+
+      - name: Update PATH
+        run: |
+          sudo ln -sf /opt/hostedtoolcache/setup-chrome/chromium/stable/x64/chrome /usr/bin/google-chrome
+
+      - name: database cache restore
+        uses: actions/cache@v4
+        with:
+          path: database_old.db
+          key: ${{ runner.os }}-database_old-${{ github.run_number }}
+          restore-keys: ${{ runner.os }}-database_old-
+
+      - name: database cache copy
+        id: db_copy
+        run: |
+          if [ -f database.db ]; then
+            LAST_COUNT=$(sqlite3 database.db "SELECT COUNT(*) FROM ZDM;")
+          else
+            LAST_COUNT=0
+          fi
+          echo "last_count=$LAST_COUNT" >> $GITHUB_OUTPUT
+          if [ -f database_old.db ]; then
+            cp database_old.db database.db
+          fi
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: main logic
+        env:
+          maxPageSize: 10
+          minVoted: 10
+          minComments: 2
+          MIN_PUSH_SIZE: 20
+          emailHost: smtp.qq.com
+          emailPort: 465
+          emailAccount: ${{ secrets.emailAccount }}
+          emailPassword: ${{ secrets.emailPassword }}
+          spt: ${{ secrets.spt }}
+          detail: false
+        run: python main.py
+
+      - name: check database changes
+        id: commit_check
+        env:
+          COMMIT_THRESHOLD: 50
+        run: |
+          LAST_COUNT=${{ steps.db_copy.outputs.last_count }}
+          CURRENT_COUNT=$(sqlite3 database.db "SELECT COUNT(*) FROM ZDM;")
+          NEW_ROWS=$((CURRENT_COUNT - LAST_COUNT))
+          echo "Last count: $LAST_COUNT , Current count: $CURRENT_COUNT , New rows: $NEW_ROWS"
+          if [ $NEW_ROWS -ge $COMMIT_THRESHOLD ]; then
+            echo "should_commit=true" >> $GITHUB_OUTPUT
+          fi
+          cp database.db database_old.db
+
+      - name: git add files
+        if: steps.commit_check.outputs.should_commit == 'true' || inputs.should_commit == 'true'
+        run: git add database.db
+
+      - name: commit & push
+        if: steps.commit_check.outputs.should_commit == 'true' || inputs.should_commit == 'true'
+        uses: actions-go/push@master
+        with:
+          author-email: 'actions@github.com'
+          author-name: 'GitHub Actions'
+          commit-message: 'update articles'
+          token: ${{ secrets.GIT_TOKEN }}
